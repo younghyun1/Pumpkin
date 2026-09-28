@@ -422,12 +422,16 @@ impl Explosion {
                 entity.get_eye_pos()
             };
             let direction = (dir_pos - self.pos).normalize();
-            // TODO: entity explosion knockback resistance attribute
-            let knockback_resistance = 0.0;
 
-            let knockback_power =
-                (1.0 - distance) * exposure * knockback_multiplier * (1.0 - knockback_resistance);
+            let knockback_power = (1.0 - distance) * exposure * knockback_multiplier;
             let knockback = direction * knockback_power;
+            // Vanilla `ServerExplosion.hurtEntities`: creative flyers get no knockback.
+            if entity_base
+                .get_player()
+                .is_some_and(|player| player.is_creative() && player.is_flying())
+            {
+                continue;
+            }
             entity.add_velocity(knockback);
         }
     }
@@ -533,9 +537,6 @@ impl Explosion {
                 let explosion_radius = decay_drops.then_some(self.power);
 
                 for (pos, (block, state)) in &blocks {
-                    world.set_block_state(pos, BlockStateId::AIR, BlockFlags::NOTIFY_ALL);
-                    world.close_container_screens_at(pos);
-
                     let pumpkin_block = world.block_registry.get_pumpkin_block(block.id);
 
                     if pumpkin_block.is_none_or(|s| s.should_drop_items_on_explosion()) {
@@ -556,6 +557,10 @@ impl Explosion {
                         };
                         drop_loot(world, block, pos, false, &params);
                     }
+
+                    world.set_block_state(pos, BlockStateId::AIR, BlockFlags::NOTIFY_ALL);
+                    world.close_container_screens_at(pos);
+
                     if let Some(pumpkin_block) = pumpkin_block {
                         pumpkin_block.explode(ExplodeArgs {
                             world,

@@ -1,5 +1,6 @@
 use super::{Controls, Goal};
 
+use crate::entity::ai::goal::revenge::MobFilter;
 use crate::entity::ai::pathfinder::NavigatorGoal;
 use crate::entity::mob::Mob;
 use crate::entity::predicate::EntityPredicate;
@@ -21,6 +22,7 @@ pub struct MeleeAttackGoal {
     attack_interval_ticks: i32,
     last_update_time: i64,
     last_target_position: Option<Vector3<f64>>,
+    gate: Option<MobFilter>,
 }
 
 impl MeleeAttackGoal {
@@ -28,7 +30,7 @@ impl MeleeAttackGoal {
     pub fn new(speed: f64, pause_when_mob_idle: bool) -> Self {
         Self {
             goal_control: Controls::MOVE | Controls::LOOK,
-            speed: speed.max(0.23), // Ensure minimum visible speed
+            speed,
             pause_when_mob_idle,
             target_location: Vector3::new(0.0, 0.0, 0.0),
             update_countdown_ticks: 0,
@@ -36,7 +38,15 @@ impl MeleeAttackGoal {
             attack_interval_ticks: 20,
             last_update_time: 0,
             last_target_position: None,
+            gate: None,
         }
+    }
+
+    /// Extra condition for starting and for continuing
+    #[must_use]
+    pub const fn gated_by(mut self, gate: MobFilter) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     #[must_use]
@@ -47,6 +57,9 @@ impl MeleeAttackGoal {
 
 impl Goal for MeleeAttackGoal {
     fn can_start(&mut self, mob: &dyn Mob) -> bool {
+        if self.gate.is_some_and(|gate| !gate(mob)) {
+            return false;
+        }
         let time = mob.get_entity().world.load().get_world_age();
 
         if time - self.last_update_time < MAX_ATTACK_TIME {
@@ -66,7 +79,10 @@ impl Goal for MeleeAttackGoal {
         true //TODO: modify that because if a path to the target not exists then call mob.is_in_attack_range(target)
     }
 
-    fn should_continue(&self, mob: &dyn Mob) -> bool {
+    fn should_continue(&mut self, mob: &dyn Mob) -> bool {
+        if self.gate.is_some_and(|gate| !gate(mob)) {
+            return false;
+        }
         let target = mob.get_mob_entity().get_target().clone();
 
         let Some(target) = target else {
@@ -77,11 +93,7 @@ impl Goal for MeleeAttackGoal {
         }
 
         if !self.pause_when_mob_idle {
-            let is_idle = mob
-                .get_mob_entity()
-                .navigator
-                .try_lock()
-                .is_ok_and(|navigator| navigator.is_idle());
+            let is_idle = mob.is_navigator_idle();
             return !is_idle;
         }
 
@@ -97,7 +109,7 @@ impl Goal for MeleeAttackGoal {
     }
 
     fn start(&mut self, mob: &dyn Mob) {
-        // TODO: add missing fields like mob attacking to true and correct Navigation methods
+        mob.get_mob_entity().set_attacking(true);
 
         let target = mob.get_mob_entity().get_target().clone();
         if let Some(target) = target {
@@ -131,6 +143,8 @@ impl Goal for MeleeAttackGoal {
             mob.set_mob_target(None);
         }
 
+        mob.get_mob_entity().set_attacking(false);
+
         // Vanilla: this.mob.getNavigation().stop()
         mob.get_mob_entity()
             .navigator
@@ -155,10 +169,13 @@ impl Goal for MeleeAttackGoal {
         self.update_countdown_ticks = (self.update_countdown_ticks - 1).max(0);
 
         let current_target_pos = target.get_entity().pos.load();
-        let should_update_nav = self.update_countdown_ticks <= 0
+        let has_line_of_sight =
+            self.pause_when_mob_idle || mob.has_line_of_sight(target.get_entity());
+        let should_update_nav = has_line_of_sight
+            && self.update_countdown_ticks <= 0
             && (self.last_target_position.is_none_or(|last_pos| {
                 current_target_pos.squared_distance_to_vec(&last_pos) >= 1.0
-            }) || mob.get_random().random_range(0..20) == 0);
+            }) || mob.get_random().random::<f32>() < 0.05);
 
         if should_update_nav {
             let mob_pos = mob.get_entity().pos.load();
@@ -180,12 +197,16 @@ impl Goal for MeleeAttackGoal {
             } else if dist_sq > 256.0 {
                 self.update_countdown_ticks += 5;
             }
+            // TODO: add 15 more ticks when the path request fails.
+            self.update_countdown_ticks = self.get_tick_count(self.update_countdown_ticks);
         }
 
         self.cooldown = (self.cooldown - 1).max(0);
 
-        // TODO: Add visibility check (canSee) - requires world raycast
-        if self.cooldown <= 0 && mob.get_mob_entity().is_in_attack_range(target.as_ref()) {
+        if self.cooldown <= 0
+            && mob.get_mob_entity().is_in_attack_range(target.as_ref())
+            && mob.has_line_of_sight(target.get_entity())
+        {
             self.cooldown = self.get_max_cooldown();
             mob.get_mob_entity().living_entity.swing_hand();
             mob.get_mob_entity()

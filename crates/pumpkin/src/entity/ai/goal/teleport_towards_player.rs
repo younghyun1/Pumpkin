@@ -6,7 +6,9 @@ use crate::entity::EntityBase;
 use crate::entity::ai::target_predicate::TargetPredicate;
 use crate::entity::mob::Mob;
 use crate::entity::mob::enderman::{EndermanEntity, PLAYER_EYE_HEIGHT};
+use crate::entity::mob::neutral::NeutralMob;
 use crate::entity::player::Player;
+use crate::world::World;
 use pumpkin_data::attributes::Attributes;
 
 const STARE_CLOSE_DISTANCE_SQ: f64 = 16.0;
@@ -41,6 +43,11 @@ impl TeleportTowardsPlayerGoal {
         }
     }
 
+    /// Vanilla `isAngerInducing`: stared at, or held against by the grudge.
+    fn is_anger_inducing(&self, player: &Player, world: &World) -> bool {
+        self.enderman.is_player_staring(player) || self.enderman.is_angry_at(player, world)
+    }
+
     fn find_staring_player(&self) -> Option<Arc<Player>> {
         let entity = &self.enderman.mob_entity.living_entity.entity;
         let world = entity.world.load();
@@ -51,26 +58,13 @@ impl TeleportTowardsPlayerGoal {
             .living_entity
             .get_attribute_value(&Attributes::FOLLOW_RANGE);
 
-        let player = world.get_closest_player(pos, follow_range)?;
-
-        if !player.get_entity().is_alive() {
-            return None;
-        }
-
-        let living = player.get_living_entity()?;
-        if !self.target_predicate.test(
-            &world,
-            Some(&self.enderman.mob_entity.living_entity),
-            living,
-        ) {
-            return None;
-        }
-
-        if self.enderman.is_player_staring(&player) || self.enderman.is_angry() {
-            return Some(player);
-        }
-
-        None
+        // A nearer player that is not anger-inducing must not hide a farther one that is.
+        let enderman: &dyn EntityBase = self.enderman.as_ref();
+        world.get_nearest_player(pos, follow_range, |player| {
+            self.target_predicate
+                .test(&world, Some(enderman), player.as_ref())
+                && self.is_anger_inducing(player, &world)
+        })
     }
 }
 
@@ -83,11 +77,12 @@ impl Goal for TeleportTowardsPlayerGoal {
         true
     }
 
-    fn should_continue(&self, mob: &dyn Mob) -> bool {
+    fn should_continue(&mut self, mob: &dyn Mob) -> bool {
         if let Some(target) = &self.target_player
             && let Some(player) = target.get_player()
         {
-            if !self.enderman.is_player_staring(player) && !self.enderman.is_angry() {
+            let world = self.enderman.mob_entity.living_entity.entity.world.load();
+            if !self.is_anger_inducing(player, &world) {
                 return false;
             }
             let player_pos = player.get_entity().pos.load();
